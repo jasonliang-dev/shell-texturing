@@ -1,7 +1,8 @@
 import { Mat4, Vec3, mat4, vec2, vec3 } from "wgpu-matrix";
 import OBJLoader, { OBJLoadResult } from "./obj-loader";
-import fxaaWGSL from "./fxaa.wgsl";
+import skyWGSL from "./sky.wgsl";
 import shellWGSL from "./shell.wgsl";
+import fxaaWGSL from "./fxaa.wgsl";
 
 const RADIANS = Math.PI / 180;
 const SIZE_UINT16 = 2;
@@ -261,7 +262,6 @@ class Model {
 class Stats {
   private beginTime = 0;
   private prevTime = 0;
-  private frame = 0;
   private textY = 0;
   private canvasWidth = 0;
   private context2D: CanvasRenderingContext2D;
@@ -297,9 +297,6 @@ class Stats {
 
     this.context2D.fillStyle = "black";
     this.context2D.font = `bold ${Stats.FONT_SIZE}px monospace`;
-
-    this.frame++;
-    this.draw(`frame: ${this.frame}`);
 
     const frameDelta = this.beginTime - this.prevTime;
     const fps = (1 / frameDelta) * 1000;
@@ -368,7 +365,7 @@ class Instrument {
     console.assert(this.index < Instrument.MAX_QUERIES);
 
     const timestampWrites: GPURenderPassTimestampWrites = {
-      querySet: this.querySet!,
+      querySet: this.querySet,
       beginningOfPassWriteIndex: this.index,
       endOfPassWriteIndex: this.index + 1,
     };
@@ -440,8 +437,6 @@ class RenderCache {
   private bindGroupLayouts = new Map<GPURenderPipeline, GPUBindGroupLayout[]>();
   private bindGroups: CacheEntryBindGroup[] = [];
   private samplers: CacheEntrySampler[] = [];
-  public hit = 0;
-  public miss = 0;
 
   public step() {
     let i = 0;
@@ -461,7 +456,6 @@ class RenderCache {
     if (arr === undefined) {
       const layout = pipeline.getBindGroupLayout(index);
       this.bindGroupLayouts.set(pipeline, [layout]);
-      this.miss++;
       return layout;
     }
 
@@ -469,11 +463,9 @@ class RenderCache {
     if (item === undefined) {
       const layout = pipeline.getBindGroupLayout(index);
       arr[index] = layout;
-      this.miss++;
       return layout;
     }
 
-    this.hit++;
     return item;
   }
 
@@ -482,14 +474,12 @@ class RenderCache {
 
     for (const bindGroup of this.bindGroups) {
       if (RenderCache.sameBindGroup(bindGroup.descriptor, descriptor)) {
-        this.hit++;
         return bindGroup.resource;
       }
     }
 
     const bindGroup = device.createBindGroup(descriptor);
     this.bindGroups.push({ resource: bindGroup, descriptor, lifetime });
-    this.miss++;
     return bindGroup;
   }
 
@@ -545,14 +535,12 @@ class RenderCache {
   public createSampler(descriptor: GPUSamplerDescriptor) {
     for (const item of this.samplers) {
       if (RenderCache.sameSampler(item.descriptor, descriptor)) {
-        this.hit++;
         return item.resource;
       }
     }
 
     const sampler = device.createSampler(descriptor);
     this.samplers.push({ resource: sampler, descriptor });
-    this.miss++;
     return sampler;
   }
 
@@ -575,14 +563,51 @@ class RenderCache {
   }
 }
 
+class Sky {
+  private pipeline: GPURenderPipeline;
+
+  constructor() {
+    const shader = device.createShaderModule({ code: uniformsWGSL + skyWGSL });
+
+    this.pipeline = device.createRenderPipeline({
+      layout: "auto",
+      primitive: {
+        topology: "triangle-list",
+        cullMode: "back",
+      },
+      depthStencil: {
+        format: "depth24plus",
+        depthCompare: "less-equal",
+        depthWriteEnabled: true,
+      },
+      vertex: {
+        module: shader,
+        entryPoint: "vp",
+      },
+      fragment: {
+        module: shader,
+        entryPoint: "fp",
+        targets: [{ format: presentationFormat }],
+      },
+    });
+  }
+
+  public run(pass: GPURenderPassEncoder) {
+    pass.setPipeline(this.pipeline);
+    pass.draw(3);
+  }
+}
+
 class Shell {
   private pipeline: GPURenderPipeline;
   private bindGroup: GPUBindGroup;
 
-  private static SHELL_COUNT = 128;
+  private static SHELL_COUNT = 64;
 
   constructor() {
-    const shader = device.createShaderModule({ code: uniformsWGSL + shellWGSL });
+    const shader = device.createShaderModule({
+      code: uniformsWGSL + shellWGSL,
+    });
 
     this.pipeline = device.createRenderPipeline({
       layout: "auto",
@@ -615,7 +640,21 @@ class Shell {
       fragment: {
         entryPoint: "fp",
         module: shader,
-        targets: [{ format: presentationFormat }],
+        targets: [
+          {
+            format: presentationFormat,
+            blend: {
+              color: {
+                srcFactor: "src-alpha",
+                dstFactor: "one-minus-src-alpha",
+              },
+              alpha: {
+                srcFactor: "src-alpha",
+                dstFactor: "one-minus-src-alpha",
+              },
+            },
+          },
+        ],
         constants: {
           SHELL_COUNT: Shell.SHELL_COUNT,
         },
@@ -624,41 +663,14 @@ class Shell {
 
     this.bindGroup = device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: ubuf } },
-      ],
+      entries: [{ binding: 0, resource: { buffer: ubuf } }],
     });
   }
 
-  public run(
-    command: GPUCommandEncoder,
-    targetView: GPUTextureView,
-    depthView: GPUTextureView,
-    model?: Model,
-  ) {
-    const pass = command.beginRenderPass({
-      label: "forward rendering pass",
-      timestampWrites: instrument?.record(),
-      colorAttachments: [
-        {
-          view: targetView,
-          clearValue: [0.7, 0.8, 1, 1],
-          loadOp: "clear",
-          storeOp: "store",
-        },
-      ],
-      depthStencilAttachment: {
-        view: depthView,
-        depthClearValue: 1,
-        depthLoadOp: "clear",
-        depthStoreOp: "store",
-      },
-    });
-
+  public run(pass: GPURenderPassEncoder, model?: Model) {
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     model?.draw(pass, Shell.SHELL_COUNT);
-    pass.end();
   }
 }
 
@@ -686,24 +698,7 @@ class FXAA {
     });
   }
 
-  public run(
-    command: GPUCommandEncoder,
-    outView: GPUTextureView,
-    inView: GPUTextureView,
-  ) {
-    const pass = command.beginRenderPass({
-      label: "fxaa pass",
-      timestampWrites: instrument?.record(),
-      colorAttachments: [
-        {
-          view: outView,
-          clearValue: [0, 0, 0, 1],
-          loadOp: "clear",
-          storeOp: "store",
-        },
-      ],
-    });
-
+  public run(pass: GPURenderPassEncoder, inView: GPUTextureView) {
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(
       0,
@@ -723,7 +718,6 @@ class FXAA {
       }),
     );
     pass.draw(3);
-    pass.end();
   }
 }
 
@@ -755,11 +749,15 @@ async function main() {
 
   presentationFormat = navigator.gpu.getPreferredCanvasFormat();
 
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+  canvas.style.width = window.innerWidth + "px";
+  canvas.style.height = window.innerHeight + "px";
+  canvas.width = window.innerWidth * window.devicePixelRatio;
+  canvas.height = window.innerHeight * window.devicePixelRatio;
   addEventListener("resize", () => {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
+    canvas.style.width = window.innerWidth + "px";
+    canvas.style.height = window.innerHeight + "px";
+    canvas.width = window.innerWidth * window.devicePixelRatio;
+    canvas.height = window.innerHeight * window.devicePixelRatio;
   });
 
   mouse.prevX = canvas.width / 2;
@@ -784,19 +782,15 @@ async function main() {
     instrument = new Instrument();
   }
 
-  const uniformBuffer = new ArrayBuffer(
-    SIZE_MAT4 + SIZE_MAT4 + SIZE_MAT4 + SIZE_VEC4,
-  );
+  const uniformBuffer = new ArrayBuffer(SIZE_MAT4 + SIZE_MAT4 + SIZE_VEC4);
   const u = {
-    model: new Float32Array(uniformBuffer, 0, 16),
-    cameraView: new Float32Array(uniformBuffer, 16 * SIZE_FLOAT, 16),
-    cameraProjection: new Float32Array(uniformBuffer, 32 * SIZE_FLOAT, 16),
-    screenResolution: new Float32Array(uniformBuffer, 48 * SIZE_FLOAT, 4),
+    cameraView: new Float32Array(uniformBuffer, 0, 16),
+    cameraProjection: new Float32Array(uniformBuffer, 16 * SIZE_FLOAT, 16),
+    screenResolution: new Float32Array(uniformBuffer, 32 * SIZE_FLOAT, 4),
   };
 
   uniformsWGSL = `
 struct Uniforms {
-  model: mat4x4f,
   cameraView: mat4x4f,
   cameraProjection: mat4x4f,
   screenResolution: vec2f,
@@ -811,6 +805,7 @@ struct Uniforms {
   cache = new RenderCache();
 
   const shell = new Shell();
+  const sky = new Sky();
   const fxaa = new FXAA();
 
   const camera = new Camera(vec3.create(0, 0, 3), -90 * RADIANS);
@@ -838,7 +833,6 @@ struct Uniforms {
     mouse.prevY = mouse.y;
     mouse.wheel = 0;
 
-    mat4.identity(u.model);
     camera.view(u.cameraView);
     mat4.perspective(60 * RADIANS, width / height, 0.1, 50, u.cameraProjection);
 
@@ -857,6 +851,7 @@ struct Uniforms {
       renderHeight = height;
 
       renderTarget?.destroy();
+      depthBuffer?.destroy();
 
       renderTarget = device.createTexture({
         size: [width, height, 1],
@@ -877,8 +872,49 @@ struct Uniforms {
     const command = device.createCommandEncoder();
     const surfaceView = context.getCurrentTexture().createView();
 
-    shell.run(command, renderTargetView, depthBufferView, model);
-    fxaa.run(command, surfaceView, renderTargetView);
+    {
+      const pass = command.beginRenderPass({
+        label: "forward rendering pass",
+        timestampWrites: instrument?.record(),
+        colorAttachments: [
+          {
+            view: renderTargetView,
+            clearValue: [0.7, 0.8, 0.9, 1],
+            loadOp: "clear",
+            storeOp: "store",
+          },
+        ],
+        depthStencilAttachment: {
+          view: depthBufferView,
+          depthClearValue: 1,
+          depthLoadOp: "clear",
+          depthStoreOp: "store",
+          depthReadOnly: false,
+        },
+      });
+
+      sky.run(pass);
+      shell.run(pass, model);
+
+      pass.end();
+    }
+
+    {
+      const pass = command.beginRenderPass({
+        label: "fxaa pass",
+        timestampWrites: instrument?.record(),
+        colorAttachments: [
+          {
+            view: surfaceView,
+            clearValue: [0, 0, 0, 1],
+            loadOp: "clear",
+            storeOp: "store",
+          },
+        ],
+      });
+      fxaa.run(pass, renderTargetView);
+      pass.end();
+    }
 
     instrument?.endFrame(command);
     device.queue.submit([command.finish()]);
