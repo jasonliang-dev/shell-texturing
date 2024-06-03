@@ -1,0 +1,15 @@
+{
+  "scripts": {
+    "dev": "esbuild src/index.ts --outfile=dist/index.js --bundle --sourcemap --loader:.wgsl=text --watch",
+    "build": "esbuild src/index.ts --outfile=dist/index.js --bundle --sourcemap --loader:.wgsl=text --minify",
+    "format": "prettier src --write"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.42",
+    "esbuild": "0.21.4",
+    "prettier": "3.3.0"
+  },
+  "dependencies": {
+    "wgpu-matrix": "^3.0.1"
+  }
+}
