@@ -1,5 +1,7 @@
 An implementation of shell texturing using WebGPU.
 
+https://jasonliang.js.org/shell-texturing/
+
 ![](image.png)
 
 ## Controls

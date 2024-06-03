@@ -1,5 +1,4 @@
-import { Mat4, Vec3, mat4, vec2, vec3, vec4 } from "wgpu-matrix";
-import { clamp } from "./helpers";
+import { Mat4, Vec3, mat4, vec2, vec3 } from "wgpu-matrix";
 import OBJLoader, { OBJLoadResult } from "./obj-loader";
 import fxaaWGSL from "./fxaa.wgsl";
 import shellWGSL from "./shell.wgsl";
@@ -69,6 +68,16 @@ addEventListener("mousemove", (e) => {
   mouse.x = e.clientX;
   mouse.y = e.clientY;
 });
+
+function clamp(n: number, lo: number, hi: number) {
+  if (n < lo) {
+    return lo;
+  } else if (n > hi) {
+    return hi;
+  } else {
+    return n;
+  }
+}
 
 class Camera {
   private yaw: number;
@@ -569,17 +578,11 @@ class RenderCache {
 class Shell {
   private pipeline: GPURenderPipeline;
   private bindGroup: GPUBindGroup;
-  private ubuf: GPUBuffer;
 
   private static SHELL_COUNT = 128;
 
   constructor() {
     const shader = device.createShaderModule({ code: uniformsWGSL + shellWGSL });
-
-    this.ubuf = device.createBuffer({
-      size: SIZE_VEC4,
-      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
 
     this.pipeline = device.createRenderPipeline({
       layout: "auto",
@@ -605,11 +608,17 @@ class Shell {
             ],
           },
         ],
+        constants: {
+          SHELL_COUNT: Shell.SHELL_COUNT,
+        },
       },
       fragment: {
         entryPoint: "fp",
         module: shader,
         targets: [{ format: presentationFormat }],
+        constants: {
+          SHELL_COUNT: Shell.SHELL_COUNT,
+        },
       },
     });
 
@@ -617,8 +626,7 @@ class Shell {
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: ubuf } },
-        { binding: 1, resource: { buffer: this.ubuf } },
-        ],
+      ],
     });
   }
 
@@ -628,8 +636,6 @@ class Shell {
     depthView: GPUTextureView,
     model?: Model,
   ) {
-    device.queue.writeBuffer(this.ubuf, 0, vec4.create(Shell.SHELL_COUNT), 0, 4);
-
     const pass = command.beginRenderPass({
       label: "forward rendering pass",
       timestampWrites: instrument?.record(),
@@ -749,11 +755,11 @@ async function main() {
 
   presentationFormat = navigator.gpu.getPreferredCanvasFormat();
 
-  canvas.width = window.innerWidth * window.devicePixelRatio;
-  canvas.height = window.innerHeight * window.devicePixelRatio;
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
   addEventListener("resize", () => {
-    canvas.width = window.innerWidth * window.devicePixelRatio;
-    canvas.height = window.innerHeight * window.devicePixelRatio;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
   });
 
   mouse.prevX = canvas.width / 2;
